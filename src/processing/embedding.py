@@ -16,7 +16,7 @@ EMBEDDING_CACHE_DIR = Path(os.path.dirname(os.path.dirname(os.path.dirname(__fil
 os.makedirs(EMBEDDING_CACHE_DIR, exist_ok=True)
 
 # 埋め込みベクトルのサイズ (ChromaDBの要件に合わせる)
-EMBEDDING_VECTOR_SIZE = 1536
+EMBEDDING_VECTOR_SIZE = 384
 
 def generate_dummy_embedding(text: str, vector_size: int = EMBEDDING_VECTOR_SIZE) -> List[float]:
     """
