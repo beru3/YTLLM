@@ -49,9 +49,20 @@ class QueryResponse(BaseModel):
     generation_time_ms: int
     total_time_ms: int
 
+@app.on_event("startup")
+async def startup_event():
+    """ログ出力を追加して、APIサーバーが起動したことを明確に表示します。"""
+    logger.info("="*50)
+    logger.info(f"Marketing LLM API サーバーが起動しました！")
+    logger.info(f"サーバーURL: http://{API_HOST}:{API_PORT}")
+    logger.info(f"API ドキュメント: http://{API_HOST}:{API_PORT}/docs")
+    logger.info(f"デバッグモード: {DEBUG}")
+    logger.info("="*50)
+
 @app.get("/")
 async def root():
     """Root endpoint for health check."""
+    logger.info("ルートエンドポイントにアクセスがありました")
     return {"status": "ok", "message": "Marketing LLM API is running"}
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -59,6 +70,7 @@ async def query(request: QueryRequest):
     """
     Process a natural language query and return a response.
     """
+    logger.info(f"クエリを受信しました: {request.query}")
     start_time = time.time()
     
     try:
@@ -66,11 +78,13 @@ async def query(request: QueryRequest):
         retrieval_start = time.time()
         chunks = search_vector_store(request.query, top_k=request.top_k)
         retrieval_time = time.time() - retrieval_start
+        logger.info(f"検索完了: {len(chunks)}件のチャンクを取得 ({int(retrieval_time * 1000)}ms)")
         
         # Step 2: Generate response
         generation_start = time.time()
         response = generate_response(request.query, chunks)
         generation_time = time.time() - generation_start
+        logger.info(f"レスポンス生成完了 ({int(generation_time * 1000)}ms)")
         
         # Format response with sources
         formatted_response = format_response_with_sources(response)
@@ -91,6 +105,7 @@ async def query(request: QueryRequest):
             )
             session.add(query_log)
         
+        logger.info(f"クエリ処理完了: 合計処理時間 {int(total_time * 1000)}ms")
         return QueryResponse(
             response=formatted_response,
             sources=response["sources"],
@@ -106,6 +121,7 @@ async def query(request: QueryRequest):
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint."""
+    logger.info("ヘルスチェックエンドポイントにアクセスがありました")
     return {
         "status": "healthy",
         "version": "0.1.0"
@@ -113,4 +129,9 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
+    print("\n" + "="*50)
+    print(f"Marketing LLM API サーバーを起動しています...")
+    print(f"サーバーURL: http://{API_HOST}:{API_PORT}")
+    print(f"API ドキュメント: http://{API_HOST}:{API_PORT}/docs")
+    print("="*50 + "\n")
     uvicorn.run("src.api.main:app", host=API_HOST, port=API_PORT, reload=DEBUG) 

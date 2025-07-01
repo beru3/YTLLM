@@ -7,6 +7,62 @@ from config.config import DEEPSEEK_API_KEY, DEEPSEEK_CHAT_MODEL
 
 logger = logging.getLogger(__name__)
 
+def generate_dummy_response(query: str, context_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate a dummy response when API keys are not available.
+    
+    Args:
+        query: User query
+        context_chunks: List of relevant context chunks
+        
+    Returns:
+        Response with generated text and source references
+    """
+    logger.warning("Using dummy response generator as API keys are not available")
+    
+    # Create a simple response that acknowledges the query and mentions the context
+    response_text = f"ダミー回答: '{query}' についての質問をいただきました。\n\n"
+    response_text += "現在、APIキーが設定されていないため、実際の回答は生成できません。\n"
+    response_text += "有効なDeepSeekまたはOpenAIのAPIキーを設定してください。\n\n"
+    
+    # Add some information about the retrieved context
+    if context_chunks:
+        response_text += f"{len(context_chunks)}件の関連コンテキストが見つかりました。\n"
+        for i, chunk in enumerate(context_chunks[:3]):  # Show only first 3 chunks
+            source_type = chunk.get("source_type", "unknown")
+            source_id = chunk.get("source_id", "unknown")
+            response_text += f"- コンテキスト {i+1}: {source_type} {source_id} からの情報\n"
+        
+        if len(context_chunks) > 3:
+            response_text += f"- その他 {len(context_chunks) - 3} 件のコンテキスト\n"
+    else:
+        response_text += "関連するコンテキストは見つかりませんでした。\n"
+    
+    # Extract source references
+    sources = []
+    for chunk in context_chunks:
+        source = {
+            "type": chunk.get("source_type"),
+            "id": chunk.get("source_id")
+        }
+        
+        if chunk.get("source_type") == "video":
+            source["start_time"] = chunk.get("start_time", 0)
+            source["end_time"] = chunk.get("end_time", 0)
+            source["url"] = f"https://www.youtube.com/watch?v={chunk.get('source_id')}&t={int(chunk.get('start_time', 0))}"
+        elif chunk.get("source_type") == "document":
+            if "page" in chunk:
+                source["page"] = chunk["page"]
+            if "sheet_name" in chunk:
+                source["sheet_name"] = chunk["sheet_name"]
+        
+        sources.append(source)
+    
+    return {
+        "text": response_text,
+        "sources": sources
+    }
+
 def generate_response(query: str, context_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Generate a response using DeepSeek Chat API.
@@ -19,7 +75,8 @@ def generate_response(query: str, context_chunks: List[Dict[str, Any]]) -> Dict[
         Response with generated text and source references
     """
     if not DEEPSEEK_API_KEY:
-        raise ValueError("DeepSeek API key is not set in environment variables")
+        logger.warning("DeepSeek API key is not set in environment variables")
+        return generate_dummy_response(query, context_chunks)
     
     try:
         # Format context for the prompt
@@ -41,18 +98,19 @@ def generate_response(query: str, context_chunks: List[Dict[str, Any]]) -> Dict[
             context_text += f"\n\n--- Context {i+1} {source_info} ---\n{chunk['text']}"
         
         # Create the system prompt
-        system_prompt = """You are a marketing expert assistant that provides accurate, helpful information based on the provided context. 
-Follow these rules:
-1. First try to answer based on the context provided.
-2. If the context doesn't contain relevant information, provide a general answer based on your knowledge of marketing principles.
-3. Always cite your sources by referencing the video or document IDs when using information from the context.
-4. When providing general knowledge not in the context, indicate this clearly.
-5. Keep responses concise and focused on marketing topics.
-6. Format your response in a clear, structured way.
-7. When mentioning specific techniques or strategies, explain how they can be applied."""
+        system_prompt = """あなたはマーケティングの専門家アシスタントで、提供されたコンテキストに基づいて正確で役立つ情報を提供します。
+以下のルールに従ってください：
+1. まず、提供されたコンテキストに基づいて回答してください。
+2. コンテキストに関連情報がない場合は、マーケティングの原則に基づいた一般的な回答を提供してください。
+3. コンテキストから情報を使用する場合は、必ず動画やドキュメントIDを参照して出典を明記してください。
+4. コンテキストにない一般的な知識を提供する場合は、それを明確に示してください。
+5. 回答は簡潔にし、マーケティングのトピックに焦点を当ててください。
+6. 回答は明確で構造化された形式で提供してください。
+7. 特定の技術や戦略について言及する場合は、それらがどのように適用できるかを説明してください。
+8. 必ず日本語で回答してください。"""
         
         # Create the user prompt
-        user_prompt = f"Question: {query}\n\nPlease answer based on the following context:{context_text}"
+        user_prompt = f"質問: {query}\n\n以下のコンテキストに基づいて回答してください:{context_text}"
         
         # Call DeepSeek Chat API
         headers = {
@@ -111,7 +169,8 @@ Follow these rules:
         
     except Exception as e:
         logger.error(f"Failed to generate response: {e}")
-        raise
+        # If API authentication fails or other errors occur, fall back to dummy response
+        return generate_dummy_response(query, context_chunks)
 
 def format_response_with_sources(response: Dict[str, Any]) -> str:
     """

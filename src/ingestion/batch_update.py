@@ -4,6 +4,9 @@ import logging
 import time
 from datetime import datetime, timedelta
 import json
+import sys
+from tqdm import tqdm
+from colorama import Fore, Style, init
 
 from src.ingestion.ingest import ingest_channel, update_video_subtitles
 from src.utils.database import get_db_session
@@ -14,6 +17,9 @@ from src.retrieval.vector_store import add_chunks_to_vector_store
 
 from config.config import YOUTUBE_CHANNEL_ID
 
+# カラー表示の初期化
+init()
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -21,11 +27,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def print_status(message, status="INFO", end="\n"):
+    """ステータスメッセージを色付きで表示する"""
+    color = Fore.WHITE
+    if status == "INFO":
+        color = Fore.BLUE
+    elif status == "SUCCESS":
+        color = Fore.GREEN
+    elif status == "WARNING":
+        color = Fore.YELLOW
+    elif status == "ERROR":
+        color = Fore.RED
+    elif status == "PROGRESS":
+        color = Fore.CYAN
+    
+    print(f"{color}[{status}]{Style.RESET_ALL} {message}", end=end)
+    sys.stdout.flush()
+
 def batch_update():
     """
     Run a batch update to ingest new videos from the channel.
     """
-    logger.info("Starting batch update")
+    print_status("バッチ更新を開始します", "INFO")
+    print_status("=" * 50, "INFO")
     
     # Get the latest video date from the database
     latest_video_date = None
@@ -35,19 +59,34 @@ def batch_update():
             latest_video_date = latest_video.published_at
     
     if latest_video_date:
-        logger.info(f"Latest video in database is from {latest_video_date}")
+        print_status(f"データベース内の最新動画日付: {latest_video_date}", "INFO")
     else:
-        logger.info("No videos in database, will ingest all videos")
+        print_status("データベースに動画がありません。すべての動画を取得します。", "INFO")
     
     # Run the ingestion
     try:
+        print_status(f"チャンネル {YOUTUBE_CHANNEL_ID} から動画を取得中...", "PROGRESS")
+        start_time = time.time()
+        
+        # チャンネルから動画を取得
         ingest_channel(YOUTUBE_CHANNEL_ID)
+        
+        # 処理時間を計算
+        elapsed_time = time.time() - start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed_time)))
+        
+        # 処理結果を表示
+        print_status(f"バッチ更新が正常に完了しました（処理時間: {elapsed_str}）", "SUCCESS")
+        
+        # データベース内の動画数を取得
+        with get_db_session() as session:
+            video_count = session.query(Video).count()
+            print_status(f"現在のデータベース内の動画数: {video_count}", "INFO")
+    
     except Exception as e:
+        print_status(f"バッチ更新に失敗しました: {e}", "ERROR")
         logger.error(f"Batch update failed: {e}", exc_info=True)
         return False
-    
-    # Log success
-    logger.info("Batch update completed successfully")
     
     # Record the update time
     with open("data/last_update.json", "w") as f:
@@ -56,6 +95,7 @@ def batch_update():
             "status": "success"
         }, f)
     
+    print_status("=" * 50, "INFO")
     return True
 
 def update_all_videos_with_accurate_timestamps(max_videos: int = None):
@@ -66,7 +106,8 @@ def update_all_videos_with_accurate_timestamps(max_videos: int = None):
     Args:
         max_videos: Maximum number of videos to update (None for all)
     """
-    logger.info("Starting update of all videos with accurate timestamps")
+    print_status("すべての動画のタイムスタンプを更新します", "INFO")
+    print_status("=" * 50, "INFO")
     
     # Get all videos with existing subtitles
     with get_db_session() as session:
@@ -77,13 +118,22 @@ def update_all_videos_with_accurate_timestamps(max_videos: int = None):
         if max_videos:
             video_ids = video_ids[:max_videos]
         
-        logger.info(f"Found {len(video_ids)} videos to update with accurate timestamps")
+        total_videos = len(video_ids)
+        print_status(f"タイムスタンプを更新する動画数: {total_videos}", "INFO")
     
-    # Update each video
-    for i, video_id in enumerate(video_ids):
+    if not video_ids:
+        print_status("更新する動画がありません", "WARNING")
+        return True
+    
+    # 開始時間を記録
+    start_time = time.time()
+    
+    # Update each video with progress bar
+    success_count = 0
+    error_count = 0
+    
+    for i, video_id in enumerate(tqdm(video_ids, desc="動画の処理", unit="videos")):
         try:
-            logger.info(f"Updating timestamps for video {i+1}/{len(video_ids)}: {video_id}")
-            
             # Get existing subtitles
             with get_db_session() as session:
                 subtitle_records = session.query(Subtitle).filter(Subtitle.video_id == video_id).all()
@@ -99,7 +149,7 @@ def update_all_videos_with_accurate_timestamps(max_videos: int = None):
                 ]
             
             if not subtitles:
-                logger.warning(f"No subtitles found for video {video_id}, skipping")
+                print_status(f"動画 {video_id} に字幕がありません。スキップします。", "WARNING")
                 continue
             
             # Process subtitles into chunks with accurate timestamps
@@ -136,15 +186,36 @@ def update_all_videos_with_accurate_timestamps(max_videos: int = None):
                     )
                     session.add(text_chunk)
             
-            logger.info(f"Successfully updated timestamps for video {video_id}")
+            success_count += 1
+            
+            # 残り時間の見積もり
+            elapsed = time.time() - start_time
+            videos_per_sec = (i + 1) / elapsed if elapsed > 0 else 0
+            remaining_videos = total_videos - (i + 1)
+            remaining_time = remaining_videos / videos_per_sec if videos_per_sec > 0 else 0
+            remaining_str = str(timedelta(seconds=int(remaining_time)))
+            
+            # 進捗状況を更新（tqdmと競合しないよう、ログに出力）
+            if (i + 1) % 5 == 0 or (i + 1) == total_videos:
+                logger.info(f"進捗: {i+1}/{total_videos} 完了 - 残り推定時間: {remaining_str}")
             
             # Sleep to avoid overloading the system
             time.sleep(0.5)
             
         except Exception as e:
+            error_count += 1
+            print_status(f"動画 {video_id} のタイムスタンプ更新に失敗: {e}", "ERROR")
             logger.error(f"Failed to update timestamps for video {video_id}: {e}", exc_info=True)
     
-    logger.info("Completed updating all videos with accurate timestamps")
+    # 処理時間を計算
+    elapsed_time = time.time() - start_time
+    elapsed_str = str(timedelta(seconds=int(elapsed_time)))
+    
+    print_status(f"すべての動画のタイムスタンプ更新が完了しました", "SUCCESS")
+    print_status(f"処理時間: {elapsed_str}", "INFO")
+    print_status(f"成功: {success_count} 動画, 失敗: {error_count} 動画", "INFO")
+    print_status("=" * 50, "INFO")
+    
     return True
 
 if __name__ == "__main__":
@@ -156,7 +227,19 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    if args.update_timestamps:
-        update_all_videos_with_accurate_timestamps(args.max)
-    else:
-        batch_update() 
+    print_status(f"\n{'='*20} 動画取り込み処理 {'='*20}", "INFO")
+    print_status(f"開始時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
+    
+    try:
+        if args.update_timestamps:
+            update_all_videos_with_accurate_timestamps(args.max)
+        else:
+            batch_update()
+        print_status("処理が正常に完了しました", "SUCCESS")
+    except KeyboardInterrupt:
+        print_status("\n処理が中断されました", "WARNING")
+    except Exception as e:
+        print_status(f"処理中にエラーが発生しました: {e}", "ERROR")
+    
+    print_status(f"終了時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
+    print_status(f"{'='*50}", "INFO") 
